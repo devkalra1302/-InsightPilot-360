@@ -4,7 +4,7 @@ Step 7 of the pipeline: Excel Export.
 
 Job of this module (and ONLY this module):
 - Take whatever results the other modules already calculated (KPIs,
-  anomaly flags, and later: data quality + trend results) and write them
+  anomaly flags, data quality, and trend results) and write them
   into a single, readable Excel workbook using openpyxl.
 
 NOT this module's job:
@@ -13,12 +13,9 @@ NOT this module's job:
   If a number here is wrong, the bug is in the module that calculated it,
   not here.
 
-Design note: `quality_report` and `trend_df` are OPTIONAL parameters,
-defaulting to None. They aren't built yet (a teammate is building
-data_quality.py and trend_analyzer.py separately). This lets the
-exporter work fully today with what exists, and once those two modules
-are done, app.py just passes their output in — nothing in this file
-needs to change.
+Design note: `quality_report` and `trend_report` are OPTIONAL parameters,
+defaulting to None. This lets the exporter still work standalone even
+if one of those modules isn't available in a given run.
 """
 
 import pandas as pd
@@ -133,17 +130,84 @@ def _write_anomaly_sheet(wb: Workbook, anomaly_report: dict) -> None:
 
 def _write_quality_sheet(wb: Workbook, quality_report: dict) -> None:
     """
-    Sheet: Data Quality — placeholder-ready for when data_quality.py is
-    done. Written generically (loops over whatever the report contains)
-    so it doesn't need to be rewritten once the real function exists —
-    it just needs to receive a dict of check_name -> result.
+    Sheet: Data Quality — reads the report shape produced by
+    data_quality.run_data_quality_checks(): a dict with "summary"
+    (flat numbers) plus "missing_values", "duplicates", "invalid_dates"
+    (each holding the detailed row-level breakdown).
     """
     ws = wb.create_sheet("Data Quality")
-    ws.append(["Check", "Result"])
-    _style_header_row(ws, 1, 2)
 
-    for check_name, result in quality_report.items():
-        ws.append([check_name, str(result)])
+    ws["A1"] = "Data Quality Summary"
+    ws["A1"].font = TITLE_FONT
+    ws.merge_cells("A1:B1")
+
+    summary = quality_report.get("summary", {})
+    summary_rows = [
+        ("Rows with missing values", summary.get("missing_values_rows", "N/A")),
+        ("Duplicate rows", summary.get("duplicate_rows", "N/A")),
+        ("Invalid date rows", summary.get("invalid_date_rows", "N/A")),
+    ]
+    start_row = 3
+    for i, (label, value) in enumerate(summary_rows):
+        ws.cell(row=start_row + i, column=1, value=label).font = LABEL_FONT
+        ws.cell(row=start_row + i, column=2, value=value)
+
+    # Detail: which columns have missing values
+    detail_row = start_row + len(summary_rows) + 2
+    ws.cell(row=detail_row, column=1, value="Missing Values by Column").font = LABEL_FONT
+    missing_by_column = quality_report.get("missing_values", {}).get("missing_by_column", {})
+    for i, (col, count) in enumerate(missing_by_column.items()):
+        ws.cell(row=detail_row + 1 + i, column=1, value=col)
+        ws.cell(row=detail_row + 1 + i, column=2, value=count)
+
+    _autofit_columns(ws)
+
+
+def _write_trend_sheet(wb: Workbook, trend_report: dict) -> None:
+    """
+    Sheet: Revenue Trend — reads the report shape produced by
+    trend_analyzer.run_trend_analysis(): "overall_growth" (one dict),
+    "segment_trends" (a list of per-region/product dicts), and
+    "insights" (plain-English sentences).
+    """
+    ws = wb.create_sheet("Revenue Trend")
+
+    ws["A1"] = "Revenue Trend"
+    ws["A1"].font = TITLE_FONT
+    ws.merge_cells("A1:B1")
+
+    overall = trend_report.get("overall_growth", {})
+    overall_rows = [
+        ("Current Period", overall.get("current_period")),
+        ("Previous Period", overall.get("previous_period")),
+        ("Current Value", overall.get("current_value")),
+        ("Previous Value", overall.get("previous_value")),
+        ("Growth %", overall.get("growth_percent")),
+    ]
+    start_row = 3
+    for i, (label, value) in enumerate(overall_rows):
+        ws.cell(row=start_row + i, column=1, value=label).font = LABEL_FONT
+        ws.cell(row=start_row + i, column=2, value=value)
+
+    # Segment breakdown table
+    table_start = start_row + len(overall_rows) + 2
+    headers = ["Segment", "Current", "Previous", "Growth %"]
+    for col_idx, header in enumerate(headers, start=1):
+        ws.cell(row=table_start, column=col_idx, value=header)
+    _style_header_row(ws, table_start, len(headers))
+
+    for i, seg in enumerate(trend_report.get("segment_trends", [])):
+        row_num = table_start + 1 + i
+        ws.cell(row=row_num, column=1, value=seg.get("segment"))
+        ws.cell(row=row_num, column=2, value=seg.get("current_value"))
+        ws.cell(row=row_num, column=3, value=seg.get("previous_value"))
+        ws.cell(row=row_num, column=4, value=seg.get("growth_percent"))
+
+    # Insights, as plain sentences below the table
+    insights_row = table_start + len(trend_report.get("segment_trends", [])) + 3
+    ws.cell(row=insights_row, column=1, value="Insights").font = LABEL_FONT
+    for i, sentence in enumerate(trend_report.get("insights", [])):
+        ws.cell(row=insights_row + 1 + i, column=1, value=sentence)
 
     _autofit_columns(ws)
 
@@ -163,7 +227,7 @@ def export_to_excel(
     kpis: dict,
     anomaly_report: dict,
     quality_report: dict = None,
-    trend_df: pd.DataFrame = None,
+    trend_report: dict = None,
     output_path: str = "InsightPilot_360_Report.xlsx",
 ) -> str:
     """
@@ -171,9 +235,10 @@ def export_to_excel(
     app.py will call — same "single wrapper function" pattern as
     calculate_kpis() and run_anomaly_checks() in the other modules.
 
-    quality_report and trend_df are optional (None by default) since
-    those modules aren't built yet. Once they exist, app.py just passes
-    them in — no changes needed here.
+    quality_report -> pass the dict from data_quality.run_data_quality_checks(df)
+    trend_report    -> pass the dict from trend_analyzer.run_trend_analysis(df)
+    Both default to None so this still works standalone if either module
+    isn't available in a given run.
     """
     wb = Workbook()
 
@@ -185,12 +250,8 @@ def export_to_excel(
     if quality_report is not None:
         _write_quality_sheet(wb, quality_report)
 
-    if trend_df is not None:
-        ws = wb.create_sheet("Revenue Trend")
-        for row in dataframe_to_rows(trend_df, index=False, header=True):
-            ws.append(row)
-        _style_header_row(ws, 1, len(trend_df.columns))
-        _autofit_columns(ws)
+    if trend_report is not None:
+        _write_trend_sheet(wb, trend_report)
 
     _write_raw_data_sheet(wb, df)
 
@@ -200,17 +261,26 @@ def export_to_excel(
 
 if __name__ == "__main__":
     # Manual test: run `python reports/excel_exporter.py` from the repo
-    # root. Uses the two modules that already exist; quality_report and
-    # trend_df are left out (None) since those aren't built yet.
+    # root. Now pulls in ALL FIVE core modules, including the teammate's
+    # data_quality.py and trend_analyzer.py.
     import sys
     sys.path.append("core")
     from data_loader import load_data
     from kpi_engine import calculate_kpis
     from anomaly_engine import run_anomaly_checks
+    from data_quality import run_data_quality_checks
+    from trend_analyzer import run_trend_analysis
 
     df = load_data("sample_data/demo_sales.csv")
     kpis = calculate_kpis(df)
     anomaly_report = run_anomaly_checks(df, method="iqr")
+    quality_report = run_data_quality_checks(df, date_column="order_date")
+    trend_report = run_trend_analysis(df, date_column="order_date", value_column="revenue", segment_column="region")
 
-    path = export_to_excel(df, kpis, anomaly_report, output_path="sample_data/test_report.xlsx")
+    path = export_to_excel(
+        df, kpis, anomaly_report,
+        quality_report=quality_report,
+        trend_report=trend_report,
+        output_path="sample_data/test_report.xlsx",
+    )
     print(f"Excel report written to: {path}")
