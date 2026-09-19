@@ -1,6 +1,6 @@
 """
-core/kpi_engine.py
-Step 4 of the pipeline: KPI Engine.
+domains/sales.py
+Sales domain KPI logic (moved from core/kpi_engine.py in Phase 2).
 
 Job of this module (and ONLY this module):
 - Take a sales DataFrame and compute the core business numbers, using the
@@ -173,6 +173,9 @@ def print_kpis(kpis: dict) -> None:
 
 
 if __name__ == "__main__":
+    import sys
+    import os
+    sys.path.append(os.path.join(os.path.dirname(__file__), "..", "core"))
     from data_loader import load_data
 
     df = load_data("sample_data/demo_sales.csv")

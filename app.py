@@ -20,11 +20,12 @@ import plotly.express as px
 import streamlit as st
 
 sys.path.append("core")
+sys.path.append("domains")
 sys.path.append("reports")
 
 from data_loader import load_data, profile_data
 from data_quality import run_data_quality_checks
-from kpi_engine import calculate_kpis
+from domains.sales import calculate_kpis
 from trend_analyzer import run_trend_analysis
 from anomaly_engine import run_anomaly_checks
 from excel_exporter import export_to_excel
