@@ -12,10 +12,18 @@ NOT this module's job:
   it only formats and writes numbers that other modules already produced.
   If a number here is wrong, the bug is in the module that calculated it,
   not here.
+- Knowing which domain it's exporting. It used to assume Sales's exact
+  KPI names (revenue, profit, top_products, ...) — that broke the moment
+  Finance/Inventory/Customer/Operations tried to export, since they don't
+  have those keys. PHASE 2 FIX: this file now takes plain, already-built
+  (label, value) rows and (sheet_name, columns, rows) list-sheets, built
+  by app.py from DOMAIN_CONFIG. This file just writes what it's handed —
+  it doesn't need to know a single domain-specific column name.
 
-Design note: `quality_report` and `trend_report` are OPTIONAL parameters,
-defaulting to None. This lets the exporter still work standalone even
-if one of those modules isn't available in a given run.
+Design note: `quality_report`, `trend_report`, and `anomaly_report` are
+OPTIONAL parameters, defaulting to None. Some domains (Operations) have
+nothing to put in one or more of these sheets, and this file must not
+crash just because a section is empty for that domain.
 """
 
 import pandas as pd
@@ -60,48 +68,62 @@ def _autofit_columns(ws, min_width: int = 12, max_width: int = 40) -> None:
         ws.column_dimensions[col_letter].width = min(max(length + 2, min_width), max_width)
 
 
-def _write_summary_sheet(wb: Workbook, kpis: dict) -> None:
+def _write_summary_sheet(wb: Workbook, domain_name: str, summary_rows: list) -> None:
     """
-    Sheet 1: Summary — the KPI cards from the dashboard wireframe
-    (Revenue, Profit, Margin, AOV, Growth), laid out as a simple label/
-    value table so it reads like a management report, not raw data.
+    Sheet 1: Summary — a simple label/value table so it reads like a
+    management report, not raw data.
+
+    summary_rows: a list of (label, already-formatted value string)
+    tuples, e.g. [("Revenue", "$251,320.24"), ("Margin", "30.82%")].
+    Built by app.py from that domain's DOMAIN_CONFIG metrics + kpis dict
+    — this function has no idea what domain it's looking at, on purpose.
     """
     ws = wb.active
     ws.title = "Summary"
 
-    ws["A1"] = "InsightPilot 360 — Sales Summary"
+    ws["A1"] = f"InsightPilot 360 — {domain_name} Summary"
     ws["A1"].font = TITLE_FONT
     ws.merge_cells("A1:B1")
 
-    rows = [
-        ("Revenue", f"${kpis['revenue']:,.2f}"),
-        ("Profit", f"${kpis['profit']:,.2f}"),
-        ("Margin %", f"{kpis['margin_pct']}%"),
-        ("Average Order Value", f"${kpis['aov']:,.2f}"),
-        ("Revenue Growth (MoM)", f"{kpis['growth_pct']}%"),
-    ]
-
     start_row = 3
-    for i, (label, value) in enumerate(rows):
+    for i, (label, value) in enumerate(summary_rows):
         ws.cell(row=start_row + i, column=1, value=label).font = LABEL_FONT
         ws.cell(row=start_row + i, column=2, value=value)
 
     _autofit_columns(ws)
 
 
-def _write_ranked_sheet(wb: Workbook, sheet_name: str, ranked_list: list, label_col: str) -> None:
+def _write_list_sheet(wb: Workbook, sheet_name: str, columns: list, rows) -> None:
     """
-    Used for both Top Products and Top Regions — same shape of data
-    (a list of (name, revenue) tuples), so one function handles both
-    instead of writing near-duplicate code twice.
+    Writes any list-shaped KPI as its own sheet — used for Top Products,
+    Top Regions, Reorder Flag, Dead Stock, or any future domain's list
+    KPIs. Handles both shapes app.py's render_lists() already handles:
+    - 2 columns: (name, value) pairs, e.g. Top Products
+    - 1 column: plain names, e.g. Reorder Flag
+    Also handles the two "nothing to show" cases gracefully: the KPI
+    came back as NOT_AVAILABLE (a string), or as a genuinely empty list.
     """
     ws = wb.create_sheet(sheet_name)
-    ws.append([label_col, "Revenue"])
-    _style_header_row(ws, 1, 2)
 
-    for name, revenue in ranked_list:
-        ws.append([name, revenue])
-        ws.cell(row=ws.max_row, column=2).number_format = "$#,##0.00"
+    if isinstance(rows, str):
+        # NOT_AVAILABLE message — required columns weren't in this file.
+        ws.append([rows])
+        _autofit_columns(ws)
+        return
+
+    ws.append(columns)
+    _style_header_row(ws, 1, len(columns))
+
+    if len(rows) == 0:
+        ws.append(["None"] + [""] * (len(columns) - 1))
+    else:
+        for item in rows:
+            if len(columns) == 2:
+                name, value = item
+                ws.append([name, value])
+                ws.cell(row=ws.max_row, column=2).number_format = "$#,##0.00"
+            else:
+                ws.append([item])
 
     _autofit_columns(ws)
 
@@ -109,8 +131,9 @@ def _write_ranked_sheet(wb: Workbook, sheet_name: str, ranked_list: list, label_
 def _write_anomaly_sheet(wb: Workbook, anomaly_report: dict) -> None:
     """
     Sheet: Anomalies — flattens the anomaly_engine's report (one entry
-    per checked column, e.g. revenue/quantity) into a single readable
-    table: which column, which order, what value, which method flagged it.
+    per checked column) into a single readable table. Columns that came
+    back as NOT_AVAILABLE (missing from this domain's file) are noted,
+    not skipped silently, so it's clear why a column isn't in the sheet.
     """
     ws = wb.create_sheet("Anomalies")
     ws.append(["Column Checked", "Method", "Order ID", "Flagged Value"])
@@ -118,6 +141,10 @@ def _write_anomaly_sheet(wb: Workbook, anomaly_report: dict) -> None:
 
     any_rows = False
     for column, summary in anomaly_report.items():
+        if not summary.get("available", True):
+            ws.append([column, "—", "", summary.get("note", "Not available")])
+            any_rows = True
+            continue
         for row in summary["anomaly_rows"]:
             ws.append([column, summary["method"], row.get("order_id"), row.get(column)])
             any_rows = True
@@ -165,14 +192,14 @@ def _write_quality_sheet(wb: Workbook, quality_report: dict) -> None:
 
 def _write_trend_sheet(wb: Workbook, trend_report: dict) -> None:
     """
-    Sheet: Revenue Trend — reads the report shape produced by
+    Sheet: Trend — reads the report shape produced by
     trend_analyzer.run_trend_analysis(): "overall_growth" (one dict),
-    "segment_trends" (a list of per-region/product dicts), and
-    "insights" (plain-English sentences).
+    "segment_trends" (a list of per-segment dicts), and "insights"
+    (plain-English sentences).
     """
-    ws = wb.create_sheet("Revenue Trend")
+    ws = wb.create_sheet("Trend")
 
-    ws["A1"] = "Revenue Trend"
+    ws["A1"] = "Trend"
     ws["A1"].font = TITLE_FONT
     ws.merge_cells("A1:B1")
 
@@ -224,28 +251,39 @@ def _write_raw_data_sheet(wb: Workbook, df: pd.DataFrame) -> None:
 
 def export_to_excel(
     df: pd.DataFrame,
-    kpis: dict,
-    anomaly_report: dict,
+    domain_name: str,
+    summary_rows: list,
+    list_sheets: list = None,
+    anomaly_report: dict = None,
     quality_report: dict = None,
     trend_report: dict = None,
     output_path: str = "InsightPilot_360_Report.xlsx",
 ) -> str:
     """
     Builds the full Excel workbook and saves it. This is the one function
-    app.py will call — same "single wrapper function" pattern as
-    calculate_kpis() and run_anomaly_checks() in the other modules.
+    app.py calls, regardless of which domain is selected.
 
-    quality_report -> pass the dict from data_quality.run_data_quality_checks(df)
-    trend_report    -> pass the dict from trend_analyzer.run_trend_analysis(df)
-    Both default to None so this still works standalone if either module
-    isn't available in a given run.
+    domain_name    -> plain display name, e.g. "Finance", used in the
+                       Summary sheet's title only.
+    summary_rows   -> [(label, formatted_value_string), ...] — built by
+                       app.py from that domain's DOMAIN_CONFIG metrics.
+    list_sheets    -> [(sheet_name, columns, rows), ...] — one entry per
+                       list-shaped KPI (Top Products, Reorder Flag, ...).
+                       Pass an empty list (or None) for domains with none.
+    anomaly_report, quality_report, trend_report -> each optional, since
+                       not every domain has all three (e.g. Operations
+                       has neither a trend-comparable value nor a numeric
+                       column to check for anomalies).
     """
     wb = Workbook()
 
-    _write_summary_sheet(wb, kpis)
-    _write_ranked_sheet(wb, "Top Products", kpis["top_products"], "Product")
-    _write_ranked_sheet(wb, "Top Regions", kpis["top_regions"], "Region")
-    _write_anomaly_sheet(wb, anomaly_report)
+    _write_summary_sheet(wb, domain_name, summary_rows)
+
+    for sheet_name, columns, rows in (list_sheets or []):
+        _write_list_sheet(wb, sheet_name, columns, rows)
+
+    if anomaly_report is not None:
+        _write_anomaly_sheet(wb, anomaly_report)
 
     if quality_report is not None:
         _write_quality_sheet(wb, quality_report)
@@ -261,24 +299,40 @@ def export_to_excel(
 
 if __name__ == "__main__":
     # Manual test: run `python reports/excel_exporter.py` from the repo
-    # root. Now pulls in ALL FIVE core modules, including the teammate's
-    # data_quality.py and trend_analyzer.py.
+    # root. FIXED: this used to import from the now-deleted
+    # core/kpi_engine.py (left over from before the Step 1 move to
+    # domains/sales.py) — updated to import from its new home, and
+    # updated to build summary_rows/list_sheets the same way app.py does.
     import sys
     sys.path.append("core")
+    sys.path.append("domains")
     from data_loader import load_data
-    from kpi_engine import calculate_kpis
+    from sales import calculate_kpis
     from anomaly_engine import run_anomaly_checks
     from data_quality import run_data_quality_checks
     from trend_analyzer import run_trend_analysis
 
     df = load_data("sample_data/demo_sales.csv")
     kpis = calculate_kpis(df)
-    anomaly_report = run_anomaly_checks(df, method="iqr")
+    anomaly_report = run_anomaly_checks(df, columns=["revenue", "quantity"], method="iqr")
     quality_report = run_data_quality_checks(df, date_column="order_date")
     trend_report = run_trend_analysis(df, date_column="order_date", value_column="revenue", segment_column="region")
 
+    summary_rows = [
+        ("Revenue", f"${kpis['revenue']:,.2f}"),
+        ("Profit", f"${kpis['profit']:,.2f}"),
+        ("Margin %", f"{kpis['margin_pct']}%"),
+        ("Average Order Value", f"${kpis['aov']:,.2f}"),
+        ("Revenue Growth (MoM)", f"{kpis['growth_pct']}%"),
+    ]
+    list_sheets = [
+        ("Top Products", ["Product", "Revenue"], kpis["top_products"]),
+        ("Top Regions", ["Region", "Revenue"], kpis["top_regions"]),
+    ]
+
     path = export_to_excel(
-        df, kpis, anomaly_report,
+        df, "Sales", summary_rows, list_sheets,
+        anomaly_report=anomaly_report,
         quality_report=quality_report,
         trend_report=trend_report,
         output_path="sample_data/test_report.xlsx",

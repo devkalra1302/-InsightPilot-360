@@ -204,6 +204,24 @@ def render_lists(kpis: dict, lists_config: list) -> None:
                 st.dataframe(table, hide_index=True)
 
 
+def build_summary_rows(kpis: dict, metrics_config: list) -> list:
+    """
+    Turns this domain's metrics into the (label, formatted_value) shape
+    excel_exporter.py's Summary sheet expects — same formatting logic as
+    the on-screen st.metric cards (format_metric), so the number on the
+    dashboard and the number in the Excel file always match exactly.
+    """
+    return [(label, format_metric(kpis[key], fmt)) for key, label, fmt in metrics_config]
+
+
+def build_list_sheets(kpis: dict, lists_config: list) -> list:
+    """
+    Turns this domain's list-shaped KPIs into the (sheet_name, columns,
+    rows) shape excel_exporter.py expects — one sheet per list KPI.
+    """
+    return [(label, column_names, kpis[key]) for key, label, column_names in lists_config]
+
+
 st.set_page_config(page_title="InsightPilot 360", layout="wide")
 
 st.title("📊 InsightPilot 360")
@@ -324,8 +342,11 @@ else:
 # ---- Step 7: Excel Export ----
 st.header("Export")
 if st.button("Generate Excel Report"):
+    summary_rows = build_summary_rows(kpis, config["metrics"])
+    list_sheets = build_list_sheets(kpis, config["lists"])
     output_path = export_to_excel(
-        df, kpis, anomaly_report,
+        df, domain, summary_rows, list_sheets,
+        anomaly_report=anomaly_report,
         quality_report=quality_report,
         trend_report=trend_report,
         output_path=f"InsightPilot_360_{domain}_Report.xlsx",
