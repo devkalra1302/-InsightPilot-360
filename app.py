@@ -79,6 +79,7 @@ DOMAIN_CONFIG = {
             ("top_products", "Top Products", ["Product", "Revenue"]),
             ("top_regions", "Top Regions", ["Region", "Revenue"]),
         ],
+        "anomaly_columns": ["revenue", "quantity"],
     },
     "Finance": {
         "calculate_kpis": finance.calculate_kpis,
@@ -93,6 +94,7 @@ DOMAIN_CONFIG = {
             ("expense_growth_pct", "Expense Growth", "percent"),
         ],
         "lists": [],
+        "anomaly_columns": ["income", "expense"],
     },
     "Inventory": {
         "calculate_kpis": inventory.calculate_kpis,
@@ -107,6 +109,7 @@ DOMAIN_CONFIG = {
             ("reorder_flag", "Products Needing Reorder", ["Product"]),
             ("dead_stock", "Dead Stock (No Sales)", ["Product"]),
         ],
+        "anomaly_columns": ["units_sold", "stock_level"],
     },
     "Customer": {
         "calculate_kpis": customer.calculate_kpis,
@@ -120,6 +123,7 @@ DOMAIN_CONFIG = {
             ("customer_lifetime_value", "Customer Lifetime Value", "money"),
         ],
         "lists": [],
+        "anomaly_columns": ["sale_amount"],
     },
     "Operations": {
         "calculate_kpis": operations.calculate_kpis,
@@ -133,6 +137,10 @@ DOMAIN_CONFIG = {
             ("backlog_count", "Backlog Count", "number"),
         ],
         "lists": [],
+        # No numeric column exists in this domain's schema (it's all
+        # dates and status text) — anomaly detection is skipped entirely
+        # below when this list is empty, same reasoning as Trend.
+        "anomaly_columns": [],
     },
 }
 
@@ -297,13 +305,21 @@ else:
     st.info("Trend-over-time analysis isn't available for this domain in Phase 2 (no comparable numeric value to track).")
 
 st.header("Anomalies")
-anomaly_report = run_anomaly_checks(df, method="iqr")
-for column, summary in anomaly_report.items():
-    st.subheader(f"{column.title()} — {summary['n_anomalies']} anomalies found ({summary['method']})")
-    if summary["anomaly_rows"]:
-        st.dataframe(pd.DataFrame(summary["anomaly_rows"]))
-    else:
-        st.write("No anomalies detected.")
+if config["anomaly_columns"]:
+    anomaly_report = run_anomaly_checks(df, columns=config["anomaly_columns"], method="iqr")
+    for column, summary in anomaly_report.items():
+        if not summary.get("available", True):
+            st.subheader(column.title())
+            st.write(summary["note"])
+            continue
+        st.subheader(f"{column.title()} — {summary['n_anomalies']} anomalies found ({summary['method']})")
+        if summary["anomaly_rows"]:
+            st.dataframe(pd.DataFrame(summary["anomaly_rows"]))
+        else:
+            st.write("No anomalies detected.")
+else:
+    anomaly_report = None
+    st.info("Anomaly detection isn't available for this domain in Phase 2 (no numeric column to check).")
 
 # ---- Step 7: Excel Export ----
 st.header("Export")
