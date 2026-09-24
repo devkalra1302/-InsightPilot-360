@@ -40,6 +40,7 @@ from anomaly_engine import run_anomaly_checks
 from excel_exporter import export_to_excel
 
 from domains import sales, finance, inventory, customer, operations
+from ai import explainer
 
 
 # ---------------------------------------------------------------------
@@ -278,6 +279,14 @@ kpis = config["calculate_kpis"](df)
 st.header("Key Metrics")
 render_metrics(kpis, config["metrics"])
 render_lists(kpis, config["lists"])
+
+# ---- AI Explanation (Step 7) ----
+# Sends ONLY the already-calculated kpis dict to Claude for a one-sentence
+# narration. If there's no API key (or the request fails for any reason),
+# explainer.py returns a plain fallback message instead of raising an
+# error — so this line can never crash the dashboard.
+st.subheader("💡 AI Summary")
+st.write(explainer.generate_explanation(domain, kpis))
 
 # ---- Step 5: Trend + Anomalies ----
 # Trend analysis needs a numeric value column to track over time.
