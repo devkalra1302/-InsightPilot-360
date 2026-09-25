@@ -3,3 +3,4 @@ sample_data/test_report.xlsx
 __pycache__/
 venv/
 .env
+InsightPilot_360_*_Report.xlsx
